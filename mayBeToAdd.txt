@@ -1,1 +1,0 @@
-May be to check the amount by which the spread has increased, like if stopLoss can still be normall put then it is fine to still enter the deal  
