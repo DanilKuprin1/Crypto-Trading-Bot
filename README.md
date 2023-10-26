@@ -1,1 +1,1 @@
-# This project implements a custom trading crypto bot.
+# This project implements a custom crypto trading bot.
