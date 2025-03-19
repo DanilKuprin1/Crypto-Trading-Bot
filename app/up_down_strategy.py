@@ -7,60 +7,57 @@ from time import time
 from binance import AsyncClient, BinanceSocketManager, enums
 from binance import exceptions as exc
 from binance.client import Client
-
 from config import Config
 
 
 class Issue(Enum):
-    NoIssue = 0
-    MainOrderWasNotPlaced = 1
+    NO_ISSUE = 0
+    MAIN_ORDER_NOT_PLACED = 1
 
 
-currentPrice = 0
-highestRichedPrice = 0
-lowestRichedPrice = 0
-takeProfitPrice = 0
-stopLossPrice = 0
-enteringPrice = 0
-openOrders = {}
-doingJob = True
+current_price = 0
+highest_reached_price = 0
+lowest_reached_price = 0
+take_profit_price = 0
+stop_loss_price = 0
+entering_price = 0
+open_orders = {}
+doing_job = True
 client = None
-inPosition = False
-trailingTakeProfitSet = False
-quantityInBase = 0
-quantityInBaseToSell = 0
-quantityInBaseToBuy = 0
-quantityInQoute = 0
-mainOrder = None
-stopLoss = None
-followingStopLoss = None
-takeProfit = None
-trailingTakeProfit = None
-startedFollowing = False
-issue = Issue.NoIssue
-forcedClosure = False
-forcedCloseOrder = None
-exceptions = []
+in_position = False
+trailing_take_profit_set = False
+quantity_in_base = 0
+quantity_in_base_to_sell = 0
+quantity_in_base_to_buy = 0
+quantity_in_quote = 0
+main_order = None
+stop_loss = None
+following_stop_loss = None
+take_profit = None
+trailing_take_profit = None
+started_following = False
+issue = Issue.NO_ISSUE
+forced_closure = False
+forced_close_order = None
+exceptions_list = []
 strategy = 0
-repayed = False
+repaid = False
 Settings = None
-isIsolated = "TRUE"
-numOfTimesPriceDidNotDeviateFromZero = 0
+is_isolated = "TRUE"
+times_price_unchanged = 0
 
 
-async def getCurrentPrice():
-    global currentPrice
-    global exceptions
-    global doingJob
+async def get_current_price():
+    global current_price, exceptions_list, doing_job
     attempt = 0
     success = False
-    asyncClient1 = None
+    async_client = None
     while not success and attempt < 3:
         try:
-            asyncClient1 = await AsyncClient.create()
-        except Exception as e:
-            exceptions.append("Couldn't create AsyncClient1")
-            logging.error(e)
+            async_client = await AsyncClient.create()
+        except Exception as excp:
+            exceptions_list.append("Couldn't create AsyncClient1")
+            logging.error(excp)
             attempt += 1
         else:
             logging.info("Successfully connected AsyncClient1")
@@ -68,640 +65,545 @@ async def getCurrentPrice():
     if not success:
         logging.error("Couldn't connect AsyncClient1 after retries")
         raise Exception
-    socketManager = BinanceSocketManager(asyncClient1)
-    klineSocket = socketManager.trade_socket(symbol=Settings.Symbol)
-    startRecievingPricesTime = time()
-    async with klineSocket as soc:
-        while doingJob:
-            if not doingJob:
-                await asyncClient1.close_connection()
+    manager = BinanceSocketManager(async_client)
+    socket = manager.trade_socket(symbol=Settings.Symbol)
+    start_time = time()
+    async with socket as soc:
+        while doing_job:
+            if not doing_job:
+                await async_client.close_connection()
                 return
-            time1 = time()
-            result = await soc.recv()
-            time2 = time()
-            newPrice = float(result["p"])
-            logging.info(f"New market price = {newPrice}")
-            priceChange = 0
-            if inPosition and newPrice > enteringPrice:
-                priceChange = round(
-                    ((newPrice - enteringPrice) / enteringPrice) * 100, 3
+            t1 = time()
+            data = await soc.recv()
+            t2 = time()
+            new_price = float(data["p"])
+            logging.info("New market price = %s", new_price)
+            change_pct = 0
+            if in_position and new_price > entering_price:
+                change_pct = round(
+                    ((new_price - entering_price) / entering_price) * 100, 3
                 )
-                logging.info(f"+{priceChange}% from entering price")
-            elif inPosition and newPrice < enteringPrice:
-                priceChange = round(
-                    ((newPrice - enteringPrice) / enteringPrice) * 100, 3
+                logging.info("+%s%% from entering price", change_pct)
+            elif in_position and new_price < entering_price:
+                change_pct = round(
+                    ((new_price - entering_price) / entering_price) * 100, 3
                 )
-                logging.info(f"{priceChange}% from entering price")
-            elif inPosition:
-                logging.info("0% from entering price")
+                logging.info("%s%% from entering price", change_pct)
+            elif in_position:
+                logging.info("0%% from entering price")
             logging.info("Strategy - Up" if strategy == 0 else "Strategy - Down")
-            currentPrice = newPrice
-            priceBrokeThrough = checkForPriceBreakThrough(newPrice)
-            if priceBrokeThrough and doingJob:
-                if takeProfit is not None:
-                    status = checkTakeProfitStatus()
-                    if status != "FILLED" and forcedCloseOrder is None:
-                        exceptions.append("Price went through takeProfit")
-                        logging.warning("Price went through takeProfit")
-                        if not closeMainOrder():
-                            logging.error(
-                                "Couldn't close base asset for a buy->sell flow"
-                            )
-                            raise SystemExit
-                        await closeConnection()
-                        break
-                    else:
-                        if strategy == 1 and doingJob:
-                            repayLoan()
-                        await closeConnection()
-                        await asyncClient1.close_connection()
-                        return
-                else:
-                    status = checkStopLossStatus()
-                    if status != "FILLED" and forcedCloseOrder is None:
-                        exceptions.append("Price went through stopLoss")
-                        logging.warning("Price went through stopLoss")
-                        if not closeMainOrder():
-                            logging.error(
-                                "Couldn't close base asset for a buy->sell flow"
-                            )
-                            raise SystemExit
-                        await closeConnection()
-                        break
-                    else:
-                        if strategy == 1 and doingJob:
-                            repayLoan()
-                        await closeConnection()
-                        await asyncClient1.close_connection()
-                        return
-            if not doingJob:
-                await asyncClient1.close_connection()
+            current_price = new_price
+            if price_breakthrough(new_price) and doing_job:
+                handle_price_break()
+                if doing_job and strategy == 1:
+                    repay_loan()
+                await close_connection()
+                await async_client.close_connection()
+                return
+            if not doing_job:
+                await async_client.close_connection()
                 return
             try:
-                analyzePriceAndCurrentPosition()
-            except Exception as e:
-                logging.error(e)
-                exceptions.append(e)
-                if not forcedClosure:
-                    closeMainOrder()
-                await closeConnection()
-                await asyncClient1.close_connection()
+                analyze_price()
+            except Exception as excp:
+                logging.error(excp)
+                exceptions_list.append(excp)
+                if not forced_closure:
+                    close_main_order()
+                await close_connection()
+                await async_client.close_connection()
                 return
-            if checkForStuckPrice(time2 - time1, priceChange) or checkForOverstayInDeal(
-                startRecievingPricesTime, priceChange
+            if stuck_price(t2 - t1, change_pct) or overstayed_in_deal(
+                start_time, change_pct
             ):
-                closeMainOrder(cancelAllorders=True)
-                await closeConnection()
-                await asyncClient1.close_connection()
-    await asyncClient1.close_connection()
+                close_main_order(cancel_all=True)
+                await close_connection()
+                await async_client.close_connection()
+    await async_client.close_connection()
 
 
-def analyzePriceAndCurrentPosition():
-    global mainOrder
-    global stopLoss
-    global inPosition
-    global followingStopLoss
-    global highestRichedPrice
-    global lowestRichedPrice
-    global enteringPrice
-    global takeProfitPrice
-    global stopLossPrice
-    global takeProfit
-    global startedFollowing
-    global quantityInBase
-    global quantityInQoute
-    global exceptions
-    global trailingTakeProfitSet
-    if inPosition and doingJob and strategy == 0:
+def analyze_price():
+    global \
+        take_profit, \
+        stop_loss, \
+        in_position, \
+        highest_reached_price, \
+        lowest_reached_price
+    if in_position and doing_job and strategy == 0:
         if (
-            currentPrice > (takeProfitPrice + Settings.SafeDealRangeAmount)
-            and takeProfit is None
-            and currentPrice
-            < (
-                takeProfitPrice
-                + Settings.AmountNotToMakeStopOrderExecuteInstantly
-                + Settings.SafeDealRangeAmount
-            )
+            current_price > take_profit_price + Settings.SafeDealRangeAmount
+            and take_profit is None
+            and current_price
+            < take_profit_price
+            + Settings.AmountNotToMakeStopOrderExecuteInstantly
+            + Settings.SafeDealRangeAmount
         ):
             try:
                 logging.info("Trying to cancel stopLoss")
-                client.cancel_order(symbol=Settings.Symbol, orderId=stopLoss["orderId"])
-            except Exception as e:
-                exceptions.append("Couldn't cancel buttom stop-loss")
-                exceptions.append(e)
+                client.cancel_order(
+                    symbol=Settings.Symbol, orderId=stop_loss["orderId"]
+                )
+            except Exception as excp:
+                exceptions_list.append("Couldn't cancel bottom stop-loss")
+                exceptions_list.append(excp)
                 logging.error("Couldn't cancel stop-loss")
                 return
             attempt = 0
-            success = False
-            while attempt < 3 and not success:
+            placed = False
+            while attempt < 3 and not placed:
                 try:
                     logging.info("Trying to place takeProfit")
-                    tp_price = takeProfitPrice
+                    tp_price = take_profit_price
                     tp_stop = round(
-                        takeProfitPrice + Settings.SafeDealRangeAmount,
+                        take_profit_price + Settings.SafeDealRangeAmount,
                         Settings.TickPriceRounding,
                     )
-                    takeProfit_order = client.create_order(
+                    order = client.create_order(
                         symbol=Settings.Symbol,
                         side=enums.SIDE_SELL,
                         type=enums.ORDER_TYPE_STOP_LOSS_LIMIT,
                         timeInForce=enums.TIME_IN_FORCE_FOK,
-                        quantity=quantityInBaseToSell,
+                        quantity=quantity_in_base_to_sell,
                         price=tp_price,
                         stopPrice=tp_stop,
                         newOrderRespType=enums.ORDER_RESP_TYPE_FULL,
                     )
-                    takeProfit = takeProfit_order
-                except Exception as e2:
-                    exceptions.append("Couldn't place take profit instantly")
-                    exceptions.append(e2)
-                    logging.error(e2)
+                    take_profit = order
+                except Exception as excp2:
+                    exceptions_list.append("Couldn't place take profit instantly")
+                    exceptions_list.append(excp2)
+                    logging.error(excp2)
                     attempt += 1
                 else:
                     logging.info("Placed takeProfit order")
-                    success = True
-                    highestRichedPrice = currentPrice
-            if not success:
-                result = closeMainOrder()
-                if result:
+                    placed = True
+                    highest_reached_price = current_price
+            if not placed:
+                if close_main_order():
                     logging.info("Closed main order due to failed takeProfit placement")
                     raise Exception
-                else:
-                    raise SystemExit
-        elif currentPrice >= (
-            takeProfitPrice
+                raise SystemExit
+        elif current_price >= (
+            take_profit_price
             + Settings.SafeDealRangeAmount
             + Settings.AmountNotToMakeStopOrderExecuteInstantly
         ):
             if (
-                highestRichedPrice == 0
-                or ((currentPrice - highestRichedPrice) / highestRichedPrice)
+                highest_reached_price == 0
+                or ((current_price - highest_reached_price) / highest_reached_price)
                 >= Settings.SignificantChangeInHighestPriceInRelationPrevious
             ):
                 logging.info("New highest price reached")
-                if highestRichedPrice == 0:
-                    if not closeStopLoss():
+                if highest_reached_price == 0:
+                    if not close_stop_loss():
                         return
-                elif takeProfit is not None:
+                elif take_profit is not None:
                     try:
                         client.cancel_order(
-                            symbol=Settings.Symbol, orderId=takeProfit["orderId"]
+                            symbol=Settings.Symbol, orderId=take_profit["orderId"]
                         )
-                    except Exception as e:
-                        exceptions.append("Couldn't cancel takeProfit and move it up")
-                        exceptions.append(e)
+                    except Exception as excp:
+                        exceptions_list.append(
+                            "Couldn't cancel takeProfit and move it up"
+                        )
+                        exceptions_list.append(excp)
                         logging.error("Couldn't cancel/adjust takeProfit")
                         return
                     logging.info("Canceled previous take profit")
                 try:
                     price = round(
-                        (
-                            currentPrice
-                            - Settings.SafeDealRangeAmount
-                            - Settings.AmountNotToMakeStopOrderExecuteInstantly
-                        ),
+                        current_price
+                        - Settings.SafeDealRangeAmount
+                        - Settings.AmountNotToMakeStopOrderExecuteInstantly,
                         Settings.TickPriceRounding,
                     )
                     stop_price = round(
-                        (
-                            currentPrice
-                            - Settings.AmountNotToMakeStopOrderExecuteInstantly
-                        ),
+                        current_price
+                        - Settings.AmountNotToMakeStopOrderExecuteInstantly,
                         Settings.TickPriceRounding,
                     )
-                    takeProfit_order = client.create_order(
+                    order = client.create_order(
                         symbol=Settings.Symbol,
                         side=enums.SIDE_SELL,
                         type=enums.ORDER_TYPE_STOP_LOSS_LIMIT,
                         timeInForce=enums.TIME_IN_FORCE_FOK,
-                        quantity=quantityInBaseToSell,
+                        quantity=quantity_in_base_to_sell,
                         price=price,
                         stopPrice=stop_price,
                         newOrderRespType=enums.ORDER_RESP_TYPE_FULL,
                     )
-                    takeProfit = takeProfit_order
-                except Exception as e:
-                    exceptions.append("Couldn't move TakeProfit up")
-                    exceptions.append(e)
+                    take_profit = order
+                except Exception as excp:
+                    exceptions_list.append("Couldn't move TakeProfit up")
+                    exceptions_list.append(excp)
                     logging.error("Couldn't move TakeProfit up")
-                    result = closeMainOrder()
-                    if result:
+                    if close_main_order():
                         raise Exception
-                    else:
-                        logging.error("Manually sell required for UpStrategy")
-                        raise SystemExit
+                    logging.error("Manual sell required for UpStrategy")
+                    raise SystemExit
                 logging.info("Moved take profit up")
-                highestRichedPrice = currentPrice
-    elif inPosition and doingJob and strategy == 1:
+                highest_reached_price = current_price
+    elif in_position and doing_job and strategy == 1:
         if (
-            currentPrice <= (takeProfitPrice - Settings.SafeDealRangeAmount)
-            and takeProfit is None
-            and currentPrice
-            > (
-                takeProfitPrice
-                - Settings.SafeDealRangeAmount
-                - Settings.AmountNotToMakeStopOrderExecuteInstantly
-            )
+            current_price <= take_profit_price - Settings.SafeDealRangeAmount
+            and take_profit is None
+            and current_price
+            > take_profit_price
+            - Settings.SafeDealRangeAmount
+            - Settings.AmountNotToMakeStopOrderExecuteInstantly
         ):
             try:
                 logging.info("Cancel stop loss for short strategy")
                 client.cancel_margin_order(
                     symbol=Settings.Symbol,
-                    isIsolated=isIsolated,
-                    orderId=stopLoss["orderId"],
+                    isIsolated=is_isolated,
+                    orderId=stop_loss["orderId"],
                 )
-            except Exception as e:
-                exceptions.append("Couldn't cancel stop-loss for short strategy")
-                exceptions.append(e)
-                logging.error(e)
+            except Exception as excp:
+                exceptions_list.append("Couldn't cancel stop-loss for short strategy")
+                exceptions_list.append(excp)
+                logging.error(excp)
                 return
             logging.info("Canceled stop loss")
             try:
                 tp_order = client.create_margin_order(
                     symbol=Settings.Symbol,
-                    isIsolated=isIsolated,
+                    isIsolated=is_isolated,
                     side=enums.SIDE_BUY,
                     type=enums.ORDER_TYPE_STOP_LOSS_LIMIT,
-                    quantity=quantityInBaseToBuy,
-                    price=takeProfitPrice,
+                    quantity=quantity_in_base_to_buy,
+                    price=take_profit_price,
                     stopPrice=round(
-                        takeProfitPrice - Settings.SafeDealRangeAmount,
+                        take_profit_price - Settings.SafeDealRangeAmount,
                         Settings.TickPriceRounding,
                     ),
                     newOrderRespType=enums.ORDER_RESP_TYPE_FULL,
                     timeInForce=enums.TIME_IN_FORCE_FOK,
                 )
-                takeProfit = tp_order
-            except Exception as e:
-                exceptions.append("Couldn't place take profit for short strategy")
-                exceptions.append(e)
-                logging.error(e)
-                closeMainOrder()
-                raise e
+                take_profit = tp_order
+            except Exception as excp:
+                exceptions_list.append("Couldn't place take profit for short strategy")
+                exceptions_list.append(excp)
+                logging.error(excp)
+                close_main_order()
+                raise excp
             logging.info("Short strategy take profit placed")
-            lowestRichedPrice = currentPrice
-        elif currentPrice <= (
-            takeProfitPrice
+            lowest_reached_price = current_price
+        elif current_price <= (
+            take_profit_price
             - Settings.SafeDealRangeAmount
             - Settings.AmountNotToMakeStopOrderExecuteInstantly
         ):
             if (
-                lowestRichedPrice == 0
-                or ((lowestRichedPrice - currentPrice) / lowestRichedPrice)
+                lowest_reached_price == 0
+                or ((lowest_reached_price - current_price) / lowest_reached_price)
                 >= Settings.SignificantChangeInHighestPriceInRelationPrevious
             ):
                 logging.info("New lowest price reached for short strategy")
-                if takeProfit is not None:
+                if take_profit is not None:
                     try:
                         client.cancel_margin_order(
                             symbol=Settings.Symbol,
-                            isIsolated=isIsolated,
-                            orderId=takeProfit["orderId"],
+                            isIsolated=is_isolated,
+                            orderId=take_profit["orderId"],
                         )
-                    except Exception as e:
-                        exceptions.append(
+                    except Exception as excp:
+                        exceptions_list.append(
                             "Couldn't cancel takeProfit for short strategy"
                         )
-                        exceptions.append(e)
-                        logging.error(e)
+                        exceptions_list.append(excp)
+                        logging.error(excp)
                         return
                     logging.info("Canceled previous take profit for short strategy")
-                elif lowestRichedPrice == 0:
+                elif lowest_reached_price == 0:
                     try:
                         client.cancel_margin_order(
                             symbol=Settings.Symbol,
-                            isIsolated=isIsolated,
-                            orderId=stopLoss["orderId"],
+                            isIsolated=is_isolated,
+                            orderId=stop_loss["orderId"],
                         )
-                    except Exception as e:
-                        exceptions.append(
+                    except Exception as excp:
+                        exceptions_list.append(
                             "Couldn't cancel stop-loss for short strategy"
                         )
-                        exceptions.append(e)
-                        logging.error(e)
+                        exceptions_list.append(excp)
+                        logging.error(excp)
                         return
                     logging.info("Canceled stop loss for short strategy")
                 try:
                     tp_order = client.create_margin_order(
                         symbol=Settings.Symbol,
-                        isIsolated=isIsolated,
+                        isIsolated=is_isolated,
                         side=enums.SIDE_BUY,
                         type=enums.ORDER_TYPE_STOP_LOSS_LIMIT,
-                        quantity=quantityInBaseToBuy,
+                        quantity=quantity_in_base_to_buy,
                         price=round(
-                            (
-                                currentPrice
-                                + Settings.SafeDealRangeAmount
-                                + Settings.AmountNotToMakeStopOrderExecuteInstantly
-                            ),
+                            current_price
+                            + Settings.SafeDealRangeAmount
+                            + Settings.AmountNotToMakeStopOrderExecuteInstantly,
                             Settings.TickPriceRounding,
                         ),
                         stopPrice=round(
-                            (
-                                currentPrice
-                                + Settings.AmountNotToMakeStopOrderExecuteInstantly
-                            ),
+                            current_price
+                            + Settings.AmountNotToMakeStopOrderExecuteInstantly,
                             Settings.TickPriceRounding,
                         ),
                         newOrderRespType=enums.ORDER_RESP_TYPE_FULL,
                         timeInForce=enums.TIME_IN_FORCE_FOK,
                     )
-                    takeProfit = tp_order
-                except Exception as e:
-                    exceptions.append("Couldn't move down/place takeProfit for short")
-                    exceptions.append(e)
-                    logging.error(e)
-                    closeMainOrder()
-                    raise e
+                    take_profit = tp_order
+                except Exception as excp:
+                    exceptions_list.append(
+                        "Couldn't move down/place takeProfit for short"
+                    )
+                    exceptions_list.append(excp)
+                    logging.error(excp)
+                    close_main_order()
+                    raise excp
                 logging.info("Moved take profit down for short strategy")
-                lowestRichedPrice = currentPrice
+                lowest_reached_price = current_price
 
 
-def borrowFunds():
+def borrow_funds():
     try:
         client.create_margin_loan(
             asset=Settings.BaseCurrency,
-            amount=f"{quantityInBase}",
-            isIsolated=isIsolated,
+            amount=str(quantity_in_base),
+            isIsolated=is_isolated,
             symbol=Settings.Symbol,
         )
-    except exc.BinanceAPIException as e:
-        exceptions.append("Couldn't borrow funds for short strategy")
-        logging.error(e)
-        raise e
-    except Exception as e:
-        exceptions.append("Couldn't borrow funds for short strategy")
-        logging.error(e)
+    except exc.BinanceAPIException as excp:
+        exceptions_list.append("Couldn't borrow funds for short strategy")
+        logging.error(excp)
+        raise excp
+    except Exception as excp:
+        exceptions_list.append("Couldn't borrow funds for short strategy")
+        logging.error(excp)
         return False
-    logging.info(f"Borrowed {quantityInBase}{Settings.BaseCurrency} for short strategy")
+    logging.info(
+        "Borrowed %s%s for short strategy", quantity_in_base, Settings.BaseCurrency
+    )
     return True
 
 
-def repayLoan():
-    global repayed
-    if not repayed:
+def repay_loan():
+    global repaid
+    if not repaid:
         success = False
         attempt = 0
         while not success and attempt < 3:
             try:
                 amt = math.ceil(
-                    (quantityInBase + quantityInBase * Settings.BorrowComissionRate)
+                    (quantity_in_base + quantity_in_base * Settings.BorrowComissionRate)
                     * pow(10, Settings.BaseCurrencyMinAmountRounding)
                 ) / pow(10, Settings.BaseCurrencyMinAmountRounding)
                 client.repay_margin_loan(
                     asset=Settings.BaseCurrency,
-                    amount=f"{amt}",
-                    isIsolated=isIsolated,
+                    amount=str(amt),
+                    isIsolated=is_isolated,
                     symbol=Settings.Symbol,
                 )
-            except Exception as e:
-                logging.error(e)
+            except Exception as excp:
+                logging.error(excp)
                 attempt += 1
             else:
                 logging.info("Successfully paid the loan back")
-                repayed = True
+                repaid = True
                 return True
-        if not success:
-            logging.error("Should repay manually")
-            raise SystemExit
+        logging.error("Should repay manually")
+        raise SystemExit
 
 
-def executeMainOrder():
-    global enteringPrice
-    global quantityInQoute
-    global stopLossPrice
-    global takeProfitPrice
-    global exceptions
-    global quantityInBase
-    global quantityInBaseToSell
-    global quantityInBaseToBuy
-    rate = getCurrentExchangeRate(Settings.Symbol)
+def execute_main_order():
+    global entering_price, quantity_in_quote, stop_loss_price, take_profit_price
+    global \
+        exceptions_list, \
+        quantity_in_base, \
+        quantity_in_base_to_sell, \
+        quantity_in_base_to_buy
+    rate = get_exchange_rate(Settings.Symbol)
     if rate is None:
         return False
-    quantity = Settings.TradingAmountInQuote / rate
-    quantityInBase = round(quantity, Settings.BaseCurrencyMinAmountRounding)
+    quant = Settings.TradingAmountInQuote / rate
+    quantity_in_base = round(quant, Settings.BaseCurrencyMinAmountRounding)
     if strategy == 1:
-        if not borrowFunds():
+        if not borrow_funds():
             return False
-        q = (quantityInBase + quantityInBase * Settings.BorrowComissionRate) / (
+        calc = (quantity_in_base + quantity_in_base * Settings.BorrowComissionRate) / (
             1 - Settings.FeeRate
         )
-        quantityInBaseToBuy = math.ceil(
-            q * pow(10, Settings.BaseCurrencyMinAmountRounding)
-        ) / pow(10, Settings.BaseCurrencyMinAmountRounding)
-        logging.info(f"Quantity in Base to buy = {quantityInBaseToBuy}")
-    if placeMainOrder():
+        quantity_in_base_to_buy_local = math.ceil(
+            calc * pow(10, Settings.BaseCurrencyMinAmountRounding)
+        )
+        quantity_in_base_to_buy_local /= pow(10, Settings.BaseCurrencyMinAmountRounding)
+        quantity_in_base_to_buy = quantity_in_base_to_buy_local
+        logging.info("Quantity in Base to buy = %s", quantity_in_base_to_buy)
+    if place_main_order():
         while True:
             try:
                 if strategy == 0:
-                    mainOrderInfo = client.get_order(
-                        symbol=Settings.Symbol, orderId=mainOrder["orderId"]
+                    info = client.get_order(
+                        symbol=Settings.Symbol, orderId=main_order["orderId"]
                     )
                 else:
-                    mainOrderInfo = client.get_margin_order(
+                    info = client.get_margin_order(
                         symbol=Settings.Symbol,
-                        isIsolated=isIsolated,
-                        orderId=mainOrder["orderId"],
+                        isIsolated=is_isolated,
+                        orderId=main_order["orderId"],
                     )
-            except Exception as e:
-                exceptions.append("Couldn't get Main Order Info")
-                logging.error(e)
+            except Exception as excp:
+                exceptions_list.append("Couldn't get Main Order Info")
+                logging.error(excp)
                 continue
-            status = mainOrderInfo["status"]
-            logging.info(f"Main Order Status: {status}")
+            status = info["status"]
+            logging.info("Main Order Status: %s", status)
             if status == "FILLED":
-                enteringPrice_local = float(
-                    mainOrderInfo["cummulativeQuoteQty"]
-                ) / float(mainOrderInfo["executedQty"])
-                enteringPrice_local = round(
-                    enteringPrice_local, Settings.TickPriceRounding
+                local_enter_price = float(info["cummulativeQuoteQty"]) / float(
+                    info["executedQty"]
                 )
-                enteringPrice_local = float(enteringPrice_local)
-                enteringPrice = enteringPrice_local
-                logging.info(f"Main order average fill price = {enteringPrice}")
-                logging.info(
-                    f"Main order amount in base = {mainOrderInfo['executedQty']}"
-                )
-                quantityInQoute_local = quantityInBase * enteringPrice
-                quantityInQoute_local = round(
-                    quantityInQoute_local, Settings.TickPriceRounding
-                )
-                quantityInQoute_local = float(quantityInQoute_local)
-                quantityInQoute = quantityInQoute_local
+                local_enter_price = round(local_enter_price, Settings.TickPriceRounding)
+                local_enter_price = float(local_enter_price)
+                entering_price_local = local_enter_price
+                entering_price = entering_price_local
+                logging.info("Main order average fill price = %s", entering_price)
+                logging.info("Main order amount in base = %s", info["executedQty"])
+                local_quote = quantity_in_base * entering_price
+                local_quote = round(local_quote, Settings.TickPriceRounding)
+                quantity_in_quote_local = float(local_quote)
+                quantity_in_quote = quantity_in_quote_local
                 if strategy == 0:
-                    takeProfit_local = enteringPrice * (1 + Settings.ProfitDealRange)
-                    takeProfit_local = round(
-                        takeProfit_local, Settings.TickPriceRounding
-                    )
-                    takeProfitPrice = takeProfit_local
-                    stopLoss_local = enteringPrice * (1 - Settings.LossDealRange)
-                    stopLoss_local = round(stopLoss_local, Settings.TickPriceRounding)
-                    stopLossPrice = stopLoss_local
-                    executedQty = float(mainOrderInfo["executedQty"])
-                    val = executedQty - executedQty * 0.001
+                    tp_local = entering_price * (1 + Settings.ProfitDealRange)
+                    tp_local = round(tp_local, Settings.TickPriceRounding)
+                    take_profit_price = tp_local
+                    sl_local = entering_price * (1 - Settings.LossDealRange)
+                    sl_local = round(sl_local, Settings.TickPriceRounding)
+                    stop_loss_price = sl_local
+                    executed_qty = float(info["executedQty"])
+                    val = executed_qty - executed_qty * 0.001
                     val2 = math.floor(
                         val * pow(10, Settings.BaseCurrencyMinAmountRounding)
                     )
-                    quantityInBaseToSell_local = val2 / pow(
+                    quantity_in_base_to_sell_local = val2 / pow(
                         10, Settings.BaseCurrencyMinAmountRounding
                     )
-                    quantityInBaseToSell = quantityInBaseToSell_local
-                    logging.info(f"Quantity in Base to sell = {quantityInBaseToSell}")
-                else:
-                    takeProfit_local = enteringPrice * (1 - Settings.ProfitDealRange)
-                    takeProfit_local = round(
-                        takeProfit_local, Settings.TickPriceRounding
+                    quantity_in_base_to_sell = quantity_in_base_to_sell_local
+                    logging.info(
+                        "Quantity in Base to sell = %s", quantity_in_base_to_sell
                     )
-                    takeProfitPrice = takeProfit_local
-                    stopLoss_local = enteringPrice * (1 + Settings.LossDealRange)
-                    stopLoss_local = round(stopLoss_local, Settings.TickPriceRounding)
-                    stopLossPrice = stopLoss_local
+                else:
+                    tp_local = entering_price * (1 - Settings.ProfitDealRange)
+                    tp_local = round(tp_local, Settings.TickPriceRounding)
+                    take_profit_price = tp_local
+                    sl_local = entering_price * (1 + Settings.LossDealRange)
+                    sl_local = round(sl_local, Settings.TickPriceRounding)
+                    stop_loss_price = sl_local
                 return True
-            elif status == "EXPIRED":
+            if status == "EXPIRED":
                 logging.error("Main order status: EXPIRED")
-                closeAllOpenOrders()
+                close_all_orders()
                 raise SystemExit
-            elif status == "CANCELED":
+            if status == "CANCELED":
                 logging.error("Main order was canceled unexpectedly")
-                closeAllOpenOrders()
+                close_all_orders()
                 raise SystemExit
     else:
         logging.error("Main order hasn't been executed")
-        exceptions.append("Main order hasn't been executed")
+        exceptions_list.append("Main order hasn't been executed")
         return False
 
 
-def placeMainOrder():
-    global mainOrder
+def place_main_order():
+    global main_order
     try:
         if strategy == 0:
-            mainOrder_local = client.order_market_buy(
-                symbol=Settings.Symbol, quantity=quantityInBase
+            local_order = client.order_market_buy(
+                symbol=Settings.Symbol, quantity=quantity_in_base
             )
-            mainOrder = mainOrder_local
+            main_order = local_order
         else:
-            mainOrder_local = client.create_margin_order(
+            local_order = client.create_margin_order(
                 symbol=Settings.Symbol,
-                isIsolated=isIsolated,
+                isIsolated=is_isolated,
                 side=enums.SIDE_SELL,
                 type=enums.ORDER_TYPE_MARKET,
-                quantity=quantityInBase,
+                quantity=quantity_in_base,
                 newOrderRespType=enums.ORDER_RESP_TYPE_FULL,
             )
-            mainOrder = mainOrder_local
-    except Exception as e:
-        exceptions.append("Couldn't place main order")
-        exceptions.append(e)
-        logging.error(e)
+            main_order = local_order
+    except Exception as excp:
+        exceptions_list.append("Couldn't place main order")
+        exceptions_list.append(excp)
+        logging.error(excp)
         return False
     logging.info("Main order placed successfully")
     return True
 
 
-def closeMainOrder(cancelAllorders=False):
-    global forcedCloseOrder
-    global forcedClosure
-    global exceptions
-    if cancelAllorders:
-        closeAllOpenOrders()
+def close_main_order(cancel_all=False):
+    global forced_close_order, forced_closure, exceptions_list
+    if cancel_all:
+        close_all_orders()
     logging.info("Trying to close main order")
     while True:
         try:
             if strategy == 0:
-                forcedCloseOrder_local = client.order_market_sell(
+                local_order = client.order_market_sell(
                     symbol=Settings.Symbol,
-                    quantity=round(quantityInBaseToSell, Settings.TickPriceRounding),
+                    quantity=round(
+                        quantity_in_base_to_sell, Settings.TickPriceRounding
+                    ),
                 )
-                forcedCloseOrder = forcedCloseOrder_local
+                forced_close_order = local_order
             else:
-                forcedCloseOrder_local = client.create_margin_order(
+                local_order = client.create_margin_order(
                     symbol=Settings.Symbol,
-                    isIsolated=isIsolated,
+                    isIsolated=is_isolated,
                     side=enums.SIDE_BUY,
                     type=enums.ORDER_TYPE_MARKET,
                     quantity=round(
-                        quantityInBaseToBuy, Settings.BaseCurrencyMinAmountRounding
+                        quantity_in_base_to_buy, Settings.BaseCurrencyMinAmountRounding
                     ),
                     newOrderRespType=enums.ORDER_RESP_TYPE_FULL,
                 )
-                forcedCloseOrder = forcedCloseOrder_local
-                repayLoan()
-        except Exception as e:
-            exceptions.append("Couldn't close the main order")
-            exceptions.append(e)
-            logging.error(e)
-            if getForcedCloseOrderStatus() != "FILLED":
+                forced_close_order = local_order
+                repay_loan()
+        except Exception as excp:
+            exceptions_list.append("Couldn't close the main order")
+            exceptions_list.append(excp)
+            logging.error(excp)
+            if forced_close_order_status() != "FILLED":
                 continue
-            else:
-                logging.info("Forced Close was executed despite the error")
-                forcedClosure = True
-                return True
+            logging.info("Forced Close was executed despite the error")
+            forced_closure = True
+            return True
         else:
             logging.info("Successfully closed MainOrder")
-            forcedClosure = True
+            forced_closure = True
             return True
 
 
-def checkMainOrder():
-    attempt = 0
-    success = False
-    order = None
-    while attempt < 3 and not success:
-        try:
-            if strategy == 0:
-                order_local = client.get_order(
-                    symbol=Settings.Symbol, orderId=mainOrder["orderId"]
-                )
-                order = order_local
-            else:
-                order_local = client.get_margin_order(
-                    symbol=Settings.Symbol,
-                    isIsolated=isIsolated,
-                    orderId=mainOrder["orderId"],
-                )
-                order = order_local
-        except Exception as e:
-            logging.error(e)
-            attempt += 1
-        else:
-            success = True
-    if not success:
-        return None
-    status = order["status"]
-    logging.info(f"Main order status: {status}")
-    return status
-
-
-def checkTakeProfitStatus():
-    if strategy == 0:
-        order = client.get_order(symbol=Settings.Symbol, orderId=takeProfit["orderId"])
-    else:
-        order = client.get_margin_order(
-            symbol=Settings.Symbol,
-            isIsolated=isIsolated,
-            orderId=takeProfit["orderId"],
-        )
-    status = order["status"]
-    logging.info(f"TakeProfit order status: {status}")
-    return status
-
-
-def cancelTakeProfit():
-    global takeProfit
+def forced_close_order_status():
     try:
-        client.cancel_order(symbol=Settings.Symbol, orderId=takeProfit["orderId"])
-        takeProfit = None
-    except Exception as e:
-        exceptions.append("Couldn't cancel take profit")
-        logging.error(e)
-        return False
-    logging.info("Canceled take profit")
-    return True
+        if strategy == 0:
+            ord_info = client.get_order(
+                symbol=Settings.Symbol, orderId=forced_close_order["orderId"]
+            )
+        else:
+            ord_info = client.get_margin_order(
+                symbol=Settings.Symbol,
+                isIsolated=is_isolated,
+                orderId=forced_close_order["orderId"],
+            )
+        st = ord_info["status"]
+        logging.info("Forced Close order status: %s", st)
+        return st
+    except Exception:
+        logging.error("Couldn't get forced closure status")
+        return None
 
 
-def placeStopLossOrder():
-    global stopLoss
-    global inPosition
+def place_stop_loss():
+    global stop_loss, in_position
     try:
         if strategy == 0:
             sl = client.create_order(
@@ -709,494 +611,525 @@ def placeStopLossOrder():
                 side=enums.SIDE_SELL,
                 type=enums.ORDER_TYPE_STOP_LOSS_LIMIT,
                 timeInForce=enums.TIME_IN_FORCE_FOK,
-                quantity=quantityInBaseToSell,
-                price=stopLossPrice,
+                quantity=quantity_in_base_to_sell,
+                price=stop_loss_price,
                 stopPrice=round(
-                    stopLossPrice + Settings.SafeDealRangeAmount,
+                    stop_loss_price + Settings.SafeDealRangeAmount,
                     Settings.TickPriceRounding,
                 ),
                 newOrderRespType=enums.ORDER_RESP_TYPE_FULL,
             )
-            stopLoss = sl
+            stop_loss = sl
         else:
             sl = client.create_margin_order(
                 symbol=Settings.Symbol,
-                isIsolated=isIsolated,
+                isIsolated=is_isolated,
                 side=enums.SIDE_BUY,
                 type=enums.ORDER_TYPE_STOP_LOSS_LIMIT,
                 timeInForce=enums.TIME_IN_FORCE_FOK,
-                quantity=quantityInBaseToBuy,
-                price=stopLossPrice,
+                quantity=quantity_in_base_to_buy,
+                price=stop_loss_price,
                 stopPrice=round(
-                    stopLossPrice - Settings.SafeDealRangeAmount,
+                    stop_loss_price - Settings.SafeDealRangeAmount,
                     Settings.TickPriceRounding,
                 ),
                 newOrderRespType=enums.ORDER_RESP_TYPE_FULL,
             )
-            stopLoss = sl
-    except Exception as e:
-        exceptions.append("Couldn't create stop loss")
-        exceptions.append(e)
+            stop_loss = sl
+    except Exception as excp:
+        exceptions_list.append("Couldn't create stop loss")
+        exceptions_list.append(excp)
         logging.error("Couldn't create stop loss")
-        closeMainOrder()
+        close_main_order()
         return False
     logging.info("StopLoss placed")
-    inPosition = True
+    in_position = True
     return True
 
 
-def checkStopLossStatus():
-    if strategy == 0:
-        order = client.get_order(symbol=Settings.Symbol, orderId=stopLoss["orderId"])
-    else:
-        order = client.get_margin_order(
-            symbol=Settings.Symbol,
-            isIsolated=isIsolated,
-            orderId=stopLoss["orderId"],
-        )
-    status = order["status"]
-    logging.info(f"StopLoss order status: {status}")
-    return status
-
-
-def closeStopLoss():
-    global exceptions
+def close_stop_loss():
     attempt = 0
-    success = False
-    while attempt < 3 and not success:
+    canceled = False
+    while attempt < 3 and not canceled:
         try:
             if strategy == 0:
-                client.cancel_order(symbol=Settings.Symbol, orderId=stopLoss["orderId"])
+                client.cancel_order(
+                    symbol=Settings.Symbol, orderId=stop_loss["orderId"]
+                )
             else:
                 client.cancel_margin_order(
                     symbol=Settings.Symbol,
-                    isIsolated=isIsolated,
-                    orderId=stopLoss["orderId"],
+                    isIsolated=is_isolated,
+                    orderId=stop_loss["orderId"],
                 )
-        except Exception as e:
-            exceptions.append("Couldn't cancel stop-loss")
-            exceptions.append(e)
-            logging.error(e)
+        except Exception as excp:
+            exceptions_list.append("Couldn't cancel stop-loss")
+            exceptions_list.append(excp)
+            logging.error(excp)
             attempt += 1
         else:
             logging.info("Canceled stop loss")
-            success = True
+            canceled = True
             return True
     return False
 
 
-def closeAllOpenOrders():
+def close_all_orders():
     logging.info("Closing all open orders")
     if strategy == 0:
         orders = client.get_open_orders(symbol=Settings.Symbol)
     else:
         orders = client.get_open_margin_orders(
-            symbol=Settings.Symbol, isIsolated=isIsolated
+            symbol=Settings.Symbol, isIsolated=is_isolated
         )
     for o in orders:
         if strategy == 0:
             client.cancel_order(symbol=Settings.Symbol, orderId=o["orderId"])
         else:
             client.cancel_margin_order(
-                symbol=Settings.Symbol, isIsolated=isIsolated, orderId=o["orderId"]
+                symbol=Settings.Symbol, isIsolated=is_isolated, orderId=o["orderId"]
             )
     logging.info("Closed all open orders")
 
 
-def checkForPriceBreakThrough(cp):
-    if takeProfit is not None:
+def price_breakthrough(cp):
+    if take_profit is not None:
         if strategy == 0:
-            if (
-                float(takeProfit["price"])
+            return (
+                float(take_profit["price"])
                 - Settings.StopLossTakeProfitPassedByCheckAmount
                 >= cp
-            ):
-                return True
-            return False
-        else:
-            if (
-                float(takeProfit["price"])
-                + Settings.StopLossTakeProfitPassedByCheckAmount
-                <= cp
-            ):
-                return True
-            return False
-    elif stopLoss is not None:
+            )
+        return (
+            float(take_profit["price"]) + Settings.StopLossTakeProfitPassedByCheckAmount
+            <= cp
+        )
+    if stop_loss is not None:
         if strategy == 0:
-            if (
-                float(stopLoss["price"])
+            return (
+                float(stop_loss["price"])
                 - Settings.StopLossTakeProfitPassedByCheckAmount
                 >= cp
-            ):
-                return True
-            return False
-        else:
-            if (
-                float(stopLoss["price"])
-                + Settings.StopLossTakeProfitPassedByCheckAmount
-                <= cp
-            ):
-                return True
-            return False
+            )
+        return (
+            float(stop_loss["price"]) + Settings.StopLossTakeProfitPassedByCheckAmount
+            <= cp
+        )
     return False
 
 
-def checkForStuckPrice(timeChange, priceChange=0):
-    if timeChange > Settings.StuckPriceTimeout and priceChange == 0:
-        exceptions.append("Price has stuck")
+def stuck_price(interval, change=0):
+    if interval > Settings.StuckPriceTimeout and change == 0:
+        exceptions_list.append("Price has stuck")
         logging.warning("Price has stuck")
         return True
     return False
 
 
-def checkForOverstayInDeal(startTime, priceChange):
-    global exceptions
-    currTime = time()
-    logging.info(f"Time Passed = {currTime - startTime}")
-    if (currTime - startTime) > Config.FirstOverstayInDealTimeout and (
-        (priceChange > 0.2) if strategy == 0 else (priceChange < -0.2)
+def overstayed_in_deal(start_t, change_pct):
+    now = time()
+    logging.info("Time Passed = %s", now - start_t)
+    if now - start_t > Config.FirstOverstayInDealTimeout and (
+        (change_pct > 0.2) if strategy == 0 else (change_pct < -0.2)
     ):
-        exceptions.append("Staying in the deal beyond first overstay threshold")
+        exceptions_list.append("Staying in the deal beyond first overstay threshold")
         logging.warning("Staying in the deal beyond first overstay threshold")
         return True
-    elif (currTime - startTime) > Config.SecondOverstayInDealTimeout:
-        exceptions.append("Staying in the deal beyond second overstay threshold")
+    if now - start_t > Config.SecondOverstayInDealTimeout:
+        exceptions_list.append("Staying in the deal beyond second overstay threshold")
         logging.warning("Staying in the deal beyond second overstay threshold")
         return True
     return False
 
 
-async def gettingCurrentOrderInfo():
-    global openOrders
-    global doingJob
-    global takeProfit
-    global exceptions
-    circleCounter = 0
-    attempt = 0
+def handle_price_break():
+    global exceptions_list
+    if take_profit is not None:
+        status = take_profit_status()
+        if status != "FILLED" and forced_close_order is None:
+            exceptions_list.append("Price went through takeProfit")
+            logging.warning("Price went through takeProfit")
+            if not close_main_order():
+                logging.error("Couldn't close base asset for a buy->sell flow")
+                raise SystemExit
+        else:
+            return
+    else:
+        status = stop_loss_status()
+        if status != "FILLED" and forced_close_order is None:
+            exceptions_list.append("Price went through stopLoss")
+            logging.warning("Price went through stopLoss")
+            if not close_main_order():
+                logging.error("Couldn't close base asset for a buy->sell flow")
+                raise SystemExit
+        else:
+            return
+
+
+def take_profit_status():
+    if strategy == 0:
+        order = client.get_order(symbol=Settings.Symbol, orderId=take_profit["orderId"])
+    else:
+        order = client.get_margin_order(
+            symbol=Settings.Symbol,
+            isIsolated=is_isolated,
+            orderId=take_profit["orderId"],
+        )
+    st = order["status"]
+    logging.info("TakeProfit order status: %s", st)
+    return st
+
+
+def stop_loss_status():
+    if strategy == 0:
+        order = client.get_order(symbol=Settings.Symbol, orderId=stop_loss["orderId"])
+    else:
+        order = client.get_margin_order(
+            symbol=Settings.Symbol, isIsolated=is_isolated, orderId=stop_loss["orderId"]
+        )
+    st = order["status"]
+    logging.info("StopLoss order status: %s", st)
+    return st
+
+
+async def getting_current_order_info():
+    global open_orders, doing_job, take_profit, exceptions_list
+    attempts = 0
     success = False
-    asyncClient2 = None
+    async_client = None
     try:
-        asyncClient2_local = await AsyncClient.create(
+        async_client_local = await AsyncClient.create(
             api_key=Settings.API_KEY, api_secret=Settings.API_SECRET
         )
-        asyncClient2 = asyncClient2_local
-    except Exception as e:
-        exceptions.append("Couldn't connect AsyncClient2")
-        exceptions.append(e)
-        logging.error(e)
-        attempt += 1
+        async_client = async_client_local
+    except Exception as excp:
+        exceptions_list.append("Couldn't connect AsyncClient2")
+        exceptions_list.append(excp)
+        logging.error(excp)
+        attempts += 1
     else:
         logging.info("Connected AsyncClient2")
         success = True
     if not success:
         logging.error("Couldn't connect asyncClient2")
-        if mainOrder is None:
-            await closeConnection()
+        if main_order is None:
+            await close_connection()
         else:
-            st = checkMainOrder()
+            st = check_main_order()
             if st == "FILLED":
-                if closeMainOrder():
-                    await closeConnection()
+                if close_main_order():
+                    await close_connection()
                 else:
                     raise SystemExit
             else:
-                await closeConnection()
-    while doingJob:
-        if takeProfit is not None:
-            s2 = False
-            a2 = 0
-            order = None
-            while not s2 and a2 < 3:
+                await close_connection()
+    counter = 0
+    while doing_job:
+        if take_profit is not None:
+            got_info = False
+            count_a2 = 0
+            order_data = None
+            while not got_info and count_a2 < 3:
                 try:
                     if strategy == 0:
-                        o = await asyncClient2.get_order(
-                            symbol=Settings.Symbol, orderId=takeProfit["orderId"]
+                        o = await async_client.get_order(
+                            symbol=Settings.Symbol, orderId=take_profit["orderId"]
                         )
-                        order = o
+                        order_data = o
                     else:
-                        o = await asyncClient2.get_margin_order(
+                        o = await async_client.get_margin_order(
                             symbol=Settings.Symbol,
-                            isIsolated=isIsolated,
-                            orderId=takeProfit["orderId"],
+                            isIsolated=is_isolated,
+                            orderId=take_profit["orderId"],
                         )
-                        order = o
-                except Exception as e:
-                    exceptions.append("Couldn't get take profit info")
-                    exceptions.append(e)
-                    logging.error(e)
-                    a2 += 1
+                        order_data = o
+                except Exception as excp:
+                    exceptions_list.append("Couldn't get take profit info")
+                    exceptions_list.append(excp)
+                    logging.error(excp)
+                    count_a2 += 1
                 else:
-                    s2 = True
-            if not s2:
+                    got_info = True
+            if not got_info:
                 continue
-            if order["status"] == "FILLED" and doingJob:
+            if order_data["status"] == "FILLED" and doing_job:
                 logging.info("Take profit has been filled")
                 if strategy == 1:
-                    repayLoan()
-                await closeConnection()
+                    repay_loan()
+                await close_connection()
                 break
-            elif order["status"] == "EXPIRED" and forcedCloseOrder is None:
-                exceptions.append("Take Profit Expired")
-                if not closeMainOrder():
+            if order_data["status"] == "EXPIRED" and forced_close_order is None:
+                exceptions_list.append("Take Profit Expired")
+                if not close_main_order():
                     raise SystemExit
-                await closeConnection()
+                await close_connection()
                 break
-        elif stopLoss is not None:
-            s2 = False
-            a2 = 0
-            order = None
-            while a2 < 3 and not s2:
+        elif stop_loss is not None:
+            got_info = False
+            count_a2 = 0
+            order_data = None
+            while count_a2 < 3 and not got_info:
                 try:
                     if strategy == 0:
-                        o = await asyncClient2.get_order(
-                            symbol=Settings.Symbol, orderId=stopLoss["orderId"]
+                        o = await async_client.get_order(
+                            symbol=Settings.Symbol, orderId=stop_loss["orderId"]
                         )
-                        order = o
+                        order_data = o
                     else:
-                        o = await asyncClient2.get_margin_order(
+                        o = await async_client.get_margin_order(
                             symbol=Settings.Symbol,
-                            isIsolated=isIsolated,
-                            orderId=stopLoss["orderId"],
+                            isIsolated=is_isolated,
+                            orderId=stop_loss["orderId"],
                         )
-                        order = o
-                except Exception as e:
-                    exceptions.append("Couldn't get stop loss info")
-                    exceptions.append(e)
-                    logging.error(e)
-                    a2 += 1
+                        order_data = o
+                except Exception as excp:
+                    exceptions_list.append("Couldn't get stop loss info")
+                    exceptions_list.append(excp)
+                    logging.error(excp)
+                    count_a2 += 1
                 else:
-                    s2 = True
-            if not s2:
+                    got_info = True
+            if not got_info:
                 continue
-            if order["status"] == "FILLED":
+            if order_data["status"] == "FILLED":
                 logging.info("StopLoss has been filled")
                 if strategy == 1:
-                    repayLoan()
-                await closeConnection()
+                    repay_loan()
+                await close_connection()
                 break
-            elif (
-                order["status"] in ["EXPIRED", "CANCELED"] and forcedCloseOrder is None
+            if (
+                order_data["status"] in ["EXPIRED", "CANCELED"]
+                and forced_close_order is None
             ):
-                if takeProfit is None and not forcedClosure:
-                    exceptions.append("StopLoss expired or canceled unexpectedly")
-                    closeMainOrder()
-                    await closeConnection()
+                if take_profit is None and not forced_closure:
+                    exceptions_list.append("StopLoss expired or canceled unexpectedly")
+                    close_main_order()
+                    await close_connection()
                     break
-        s3 = False
-        a3 = 0
-        while not s3 and a3 < 3:
+        got_orders = False
+        count_a3 = 0
+        while not got_orders and count_a3 < 3:
             try:
                 if strategy == 0:
-                    oo = await asyncClient2.get_open_orders(symbol=Settings.Symbol)
-                    openOrders = oo
+                    oo = await async_client.get_open_orders(symbol=Settings.Symbol)
+                    open_orders = oo
                 else:
-                    oo = await asyncClient2.get_open_margin_orders(
-                        symbol=Settings.Symbol, isIsolated=isIsolated
+                    oo = await async_client.get_open_margin_orders(
+                        symbol=Settings.Symbol, isIsolated=is_isolated
                     )
-                    openOrders = oo
-            except Exception as e:
-                exceptions.append("Couldn't retrieve open orders")
-                exceptions.append(e)
-                logging.error(e)
-                a3 += 1
+                    open_orders = oo
+            except Exception as excp:
+                exceptions_list.append("Couldn't retrieve open orders")
+                exceptions_list.append(excp)
+                logging.error(excp)
+                count_a3 += 1
             else:
-                s3 = True
-        if not s3:
-            closeMainOrder()
-            await closeConnection()
-            await asyncClient2.close_connection()
+                got_orders = True
+        if not got_orders:
+            close_main_order()
+            await close_connection()
+            await async_client.close_connection()
             raise exc.BinanceRequestException
-        if openOrders == [] and doingJob:
-            if takeProfit is not None and doingJob:
-                st = checkTakeProfitStatus()
+        if not open_orders and doing_job:
+            if take_profit is not None and doing_job:
+                st = take_profit_status()
                 if st == "FILLED":
                     if strategy == 1:
-                        repayLoan()
-                    await closeConnection()
+                        repay_loan()
+                    await close_connection()
                     break
-                elif st == "EXPIRED":
-                    closeMainOrder()
-                    exceptions.append("Take Profit Expired")
-                    await closeConnection()
+                if st == "EXPIRED":
+                    close_main_order()
+                    exceptions_list.append("Take Profit Expired")
+                    await close_connection()
                     break
-            elif stopLoss is not None and doingJob:
-                st = checkStopLossStatus()
+            elif stop_loss is not None and doing_job:
+                st = stop_loss_status()
                 if st == "FILLED":
                     if strategy == 1:
-                        repayLoan()
-                    await closeConnection()
+                        repay_loan()
+                    await close_connection()
                     break
-                elif st == "EXPIRED":
-                    closeMainOrder()
-                    exceptions.append("Stop Loss Expired")
-                    await closeConnection()
+                if st == "EXPIRED":
+                    close_main_order()
+                    exceptions_list.append("Stop Loss Expired")
+                    await close_connection()
                     break
-            elif mainOrder is not None:
+            elif main_order is not None:
                 logging.info("Neither stopLoss nor takeProfit placed yet")
             else:
                 logging.info("Main order has not been placed yet")
-        if circleCounter >= 2:
+        if counter >= 2:
             logging.info("Open Order Info:")
-            for o in openOrders:
+            for o in open_orders:
                 logging.info("------------")
-                check_price = float(o["price"])
+                chk_price = float(o["price"])
                 if (
-                    (check_price > enteringPrice)
+                    (chk_price > entering_price)
                     if strategy == 0
-                    else (check_price < enteringPrice)
+                    else (chk_price < entering_price)
                 ):
                     logging.info("Take Profit:")
                 else:
                     logging.info("Stop Loss:")
                 logging.info(o)
             logging.info("------------")
-            circleCounter = 0
+            counter = 0
         else:
-            circleCounter += 1
+            counter += 1
         await asyncio.sleep(0.5)
-    await asyncClient2.close_connection()
+    await async_client.close_connection()
     logging.info("AsyncClient2 closed")
 
 
-def getCurrentExchangeRate(pair):
-    try:
-        info = client.get_ticker(symbol=pair)["lastPrice"]
-    except Exception as e:
-        exceptions.append("Couldn't get current exchange rate")
-        logging.error(e)
+def check_main_order():
+    attempt = 0
+    success = False
+    ord_data = None
+    while attempt < 3 and not success:
+        try:
+            if strategy == 0:
+                o = client.get_order(
+                    symbol=Settings.Symbol, orderId=main_order["orderId"]
+                )
+                ord_data = o
+            else:
+                o = client.get_margin_order(
+                    symbol=Settings.Symbol,
+                    isIsolated=is_isolated,
+                    orderId=main_order["orderId"],
+                )
+                ord_data = o
+        except Exception as excp:
+            logging.error(excp)
+            attempt += 1
+        else:
+            success = True
+    if not success:
         return None
-    val = float(info)
-    logging.info(f"Current exchange for {pair} = {val}")
+    st = ord_data["status"]
+    logging.info("Main order status: %s", st)
+    return st
+
+
+def get_exchange_rate(pair):
+    try:
+        price = client.get_ticker(symbol=pair)["lastPrice"]
+    except Exception as excp:
+        exceptions_list.append("Couldn't get current exchange rate")
+        logging.error(excp)
+        return None
+    val = float(price)
+    logging.info("Current exchange for %s = %s", pair, val)
     return val
 
 
-def getSpread(symbol):
+def get_spread(symbol):
     try:
         info = client.get_orderbook_ticker(symbol=symbol)
         sp = round(
             float(info["askPrice"]) - float(info["bidPrice"]),
             Settings.TickPriceRounding,
         )
-        logging.info(f"Spread = {sp}")
+        logging.info("Spread = %s", sp)
         return sp
-    except Exception as e:
-        logging.error(f"Couldn't get {symbol} spread: {e}")
+    except Exception as excp:
+        logging.error("Couldn't get %s spread: %s", symbol, excp)
         return -1
 
 
-def getForcedCloseOrderStatus():
-    try:
-        if strategy == 0:
-            order = client.get_order(
-                symbol=Settings.Symbol, orderId=forcedCloseOrder["orderId"]
-            )
-        else:
-            order = client.get_margin_order(
-                symbol=Settings.Symbol,
-                isIsolated=isIsolated,
-                orderId=forcedCloseOrder["orderId"],
-            )
-        st = order["status"]
-        logging.info(f"Forced Close order status: {st}")
-        return st
-    except Exception:
-        logging.error("Couldn't get forced closure status")
-        return None
-
-
-def printLastPrices(symbol):
+def print_last_prices(symbol):
     try:
         info = client.get_symbol_ticker(symbol=symbol)
-        logging.info(f"Price for {symbol} = {info['price']}")
-    except Exception as e:
-        logging.error(f"Couldn't get last price for {symbol}: {e}")
+        logging.info("Price for %s = %s", symbol, info["price"])
+    except Exception as excp:
+        logging.error("Couldn't get last price for %s: %s", symbol, excp)
 
 
-def restoreGlobals():
-    global currentPrice
-    global highestRichedPrice
-    global lowestRichedPrice
-    global takeProfitPrice
-    global stopLossPrice
-    global enteringPrice
-    global openOrders
-    global doingJob
-    global client
-    global inPosition
-    global quantityInBase
-    global quantityInBaseToSell
-    global quantityInBaseToBuy
-    global mainOrder
-    global stopLoss
-    global followingStopLoss
-    global takeProfit
-    global startedFollowing
-    global issue
-    global forcedClosure
-    global forcedCloseOrder
-    global exceptions
-    global quantityInQoute
-    global strategy
-    global trailingTakeProfitSet
-    global repayed
-    global Settings
-    global isIsolated
-    trailingTakeProfitSet = False
-    currentPrice = 0
-    highestRichedPrice = 0
-    lowestRichedPrice = 0
-    takeProfitPrice = 0
-    stopLossPrice = 0
-    enteringPrice = 0
-    openOrders = {}
-    doingJob = True
+def restore_globals():
+    global \
+        current_price, \
+        highest_reached_price, \
+        lowest_reached_price, \
+        take_profit_price, \
+        stop_loss_price
+    global \
+        entering_price, \
+        open_orders, \
+        doing_job, \
+        client, \
+        in_position, \
+        quantity_in_base, \
+        quantity_in_base_to_sell
+    global \
+        quantity_in_base_to_buy, \
+        main_order, \
+        stop_loss, \
+        following_stop_loss, \
+        take_profit, \
+        started_following
+    global \
+        issue, \
+        forced_closure, \
+        forced_close_order, \
+        exceptions_list, \
+        quantity_in_quote, \
+        strategy
+    global trailing_take_profit_set, repaid, Settings, is_isolated
+    trailing_take_profit_set = False
+    current_price = 0
+    highest_reached_price = 0
+    lowest_reached_price = 0
+    take_profit_price = 0
+    stop_loss_price = 0
+    entering_price = 0
+    open_orders = {}
+    doing_job = True
     client = None
-    inPosition = False
-    quantityInBase = 0
-    mainOrder = None
-    stopLoss = None
-    followingStopLoss = None
-    takeProfit = None
-    startedFollowing = False
-    issue = Issue.NoIssue
-    forcedClosure = False
-    forcedCloseOrder = None
-    exceptions = []
-    quantityInQoute = 0
-    quantityInBaseToSell = 0
-    quantityInBaseToBuy = 0
+    in_position = False
+    quantity_in_base = 0
+    main_order = None
+    stop_loss = None
+    following_stop_loss = None
+    take_profit = None
+    started_following = False
+    issue = Issue.NO_ISSUE
+    forced_closure = False
+    forced_close_order = None
+    exceptions_list = []
+    quantity_in_quote = 0
+    quantity_in_base_to_sell = 0
+    quantity_in_base_to_buy = 0
     strategy = 0
-    repayed = False
+    repaid = False
     Settings = None
-    isIsolated = "TRUE"
+    is_isolated = "TRUE"
 
 
-async def closeConnection():
+async def close_connection():
     logging.info("closeConnection")
-    closeAllOpenOrders()
-    global doingJob
-    doingJob = False
-    printLastPrices(symbol=Settings.Symbol)
+    close_all_orders()
+    global doing_job
+    doing_job = False
+    print_last_prices(Settings.Symbol)
     await asyncio.sleep(2)
-    printLastPrices(symbol=Settings.Symbol)
+    print_last_prices(Settings.Symbol)
 
 
-async def spaceDivider():
-    while doingJob:
+async def space_divider():
+    while doing_job:
         logging.debug(".")
         await asyncio.sleep(0.5)
 
 
 async def main(mainClient, config, strat=0, isolated=True):
-    restoreGlobals()
-    global client
-    global exceptions
-    global strategy
-    global Settings
-    global isIsolated
+    restore_globals()
+    global client, exceptions_list, strategy, Settings, is_isolated
     Settings = config
     strategy = strat
-    returnDict = {
+    client = mainClient
+    is_isolated = "TRUE" if isolated else "FALSE"
+    result = {
         "mainOrderId": 0,
         "tradingAmountInBase": 0,
         "tradingAmountInQuote": 0,
@@ -1206,119 +1139,113 @@ async def main(mainClient, config, strat=0, isolated=True):
         "closedPrice": 0,
         "closedBy": 0,
         "updatedSpread": 0,
-        "issues": exceptions,
+        "issues": exceptions_list,
     }
-    isIsolated = "TRUE" if isolated else "FALSE"
-    logging.info("Strategy main entry")
-    client = mainClient
-    s = getSpread(symbol=Settings.Symbol)
-    currentSpread = round(s, Settings.TickPriceRounding)
-    returnDict["updatedSpread"] = currentSpread
-    if currentSpread == -1:
-        exceptions.append("Couldn't get the spread")
+    sp = get_spread(symbol=Settings.Symbol)
+    current_spread = round(sp, Settings.TickPriceRounding)
+    result["updatedSpread"] = current_spread
+    if current_spread == -1:
+        exceptions_list.append("Couldn't get the spread")
         logging.error("Couldn't get the spread")
-        return returnDict
-    if currentSpread > (Settings.InitialSpread) * config.MaxIncreaseInSpreadMultiplier:
-        msg = f"Spread increased to {currentSpread} from {Settings.InitialSpread}"
-        exceptions.append(msg)
+        return result
+    if current_spread > Settings.InitialSpread * config.MaxIncreaseInSpreadMultiplier:
+        msg = f"Spread increased to {current_spread} from {Settings.InitialSpread}"
+        exceptions_list.append(msg)
         logging.error(msg)
-        return returnDict
-    check1 = executeMainOrder()
-    if not check1:
-        printLastPrices(symbol=Settings.Symbol)
-        return returnDict
-    check2 = placeStopLossOrder()
+        return result
+    if not execute_main_order():
+        print_last_prices(Settings.Symbol)
+        return result
+    if not place_stop_loss():
+        return result
     try:
-        if check1 and check2:
-            task1 = asyncio.create_task(getCurrentPrice())
-            task2 = asyncio.create_task(gettingCurrentOrderInfo())
-            await task1
-            await task2
-    except Exception as e:
-        exceptions.append(e)
-        logging.error(e)
-        closeMainOrder(cancelAllorders=True)
+        task_price = asyncio.create_task(get_current_price())
+        task_orders = asyncio.create_task(getting_current_order_info())
+        await task_price
+        await task_orders
+    except Exception as excp:
+        exceptions_list.append(excp)
+        logging.error(excp)
+        close_main_order(cancel_all=True)
     finally:
-        closeAllOpenOrders()
-    closedPrice = 0
-    closedBy = ""
-    if forcedClosure:
+        close_all_orders()
+    closed_price = 0
+    closed_by = ""
+    if forced_closure:
         if strategy == 0:
             info = client.get_order(
-                symbol=Settings.Symbol, orderId=forcedCloseOrder["orderId"]
+                symbol=Settings.Symbol, orderId=forced_close_order["orderId"]
             )
         else:
             info = client.get_margin_order(
                 symbol=Settings.Symbol,
-                isIsolated=isIsolated,
-                orderId=forcedCloseOrder["orderId"],
+                isIsolated=is_isolated,
+                orderId=forced_close_order["orderId"],
             )
-        cPrice = float(info["cummulativeQuoteQty"]) / float(info["executedQty"])
-        closedPrice = cPrice
-        closedBy = "Forced Closure"
-    elif takeProfit is not None:
+        c_price = float(info["cummulativeQuoteQty"]) / float(info["executedQty"])
+        closed_price = c_price
+        closed_by = "Forced Closure"
+    elif take_profit is not None:
         if strategy == 0:
             info = client.get_order(
-                symbol=Settings.Symbol, orderId=takeProfit["orderId"]
+                symbol=Settings.Symbol, orderId=take_profit["orderId"]
             )
         else:
             info = client.get_margin_order(
                 symbol=Settings.Symbol,
-                isIsolated=isIsolated,
-                orderId=takeProfit["orderId"],
+                isIsolated=is_isolated,
+                orderId=take_profit["orderId"],
             )
-        cPrice = float(info["cummulativeQuoteQty"]) / float(info["executedQty"])
-        closedPrice = cPrice
-        closedBy = "Take Profit"
-    elif stopLoss is not None:
+        c_price = float(info["cummulativeQuoteQty"]) / float(info["executedQty"])
+        closed_price = c_price
+        closed_by = "Take Profit"
+    elif stop_loss is not None:
         if strategy == 0:
-            info = client.get_order(symbol=Settings.Symbol, orderId=stopLoss["orderId"])
+            info = client.get_order(
+                symbol=Settings.Symbol, orderId=stop_loss["orderId"]
+            )
         else:
             info = client.get_margin_order(
                 symbol=Settings.Symbol,
-                isIsolated=isIsolated,
-                orderId=stopLoss["orderId"],
+                isIsolated=is_isolated,
+                orderId=stop_loss["orderId"],
             )
         if float(info["executedQty"]) == 0:
-            closedPrice = 0
+            closed_price = 0
         else:
-            cPrice = float(info["cummulativeQuoteQty"]) / float(info["executedQty"])
-            closedPrice = cPrice
-            closedBy = "Stop Loss"
+            c_price = float(info["cummulativeQuoteQty"]) / float(info["executedQty"])
+            closed_price = c_price
+            closed_by = "Stop Loss"
     else:
-        cPrice = 0
         if strategy == 0:
             info = client.get_order(
-                symbol=Settings.Symbol, orderId=trailingTakeProfit["orderId"]
+                symbol=Settings.Symbol, orderId=trailing_take_profit["orderId"]
             )
         else:
             info = client.get_margin_order(
                 symbol=Settings.Symbol,
-                isIsolated=isIsolated,
-                orderId=trailingTakeProfit["orderId"],
+                isIsolated=is_isolated,
+                orderId=trailing_take_profit["orderId"],
             )
-        cPrice = float(info["cummulativeQuoteQty"]) / float(info["executedQty"])
-        closedPrice = cPrice
-        closedBy = "Traililng Take Profit"
-    if mainOrder is None:
-        mainOrderId = 0
-    else:
-        mainOrderId = mainOrder["orderId"]
-        returnDict["mainOrderId"] = mainOrderId
-        returnDict["tradingAmountInBase"] = quantityInBase
-        returnDict["tradingAmountInQuote"] = quantityInQoute
-        returnDict["enteringPrice"] = enteringPrice
-        returnDict["stopLossPrice"] = stopLossPrice
-        returnDict["takeProfitPrice"] = takeProfitPrice
-        returnDict["closedPrice"] = closedPrice
-        returnDict["closedBy"] = closedBy
-        returnDict["exceptions"] = exceptions
+        c_price = float(info["cummulativeQuoteQty"]) / float(info["executedQty"])
+        closed_price = c_price
+        closed_by = "Traililng Take Profit"
+    if main_order is not None:
+        result["mainOrderId"] = main_order["orderId"]
+        result["tradingAmountInBase"] = quantity_in_base
+        result["tradingAmountInQuote"] = quantity_in_quote
+        result["enteringPrice"] = entering_price
+        result["stopLossPrice"] = stop_loss_price
+        result["takeProfitPrice"] = take_profit_price
+        result["closedPrice"] = closed_price
+        result["closedBy"] = closed_by
+        result["exceptions"] = exceptions_list
     logging.info("Deal is done")
-    return returnDict
+    return result
 
 
 if __name__ == "__main__":
-    config = Config()
-    client = Client(config.API_KEY, config.API_SECRET)
-    config.setSymbol("IOTXUSDT")
-    asyncio.run(main(mainClient=client, config=config, strat=1, isolated=False))
+    cfg = Config()
+    cli = Client(cfg.API_KEY, cfg.API_SECRET)
+    cfg.setSymbol("IOTXUSDT")
+    asyncio.run(main(mainClient=cli, config=cfg, strat=1, isolated=False))
