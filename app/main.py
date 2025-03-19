@@ -12,7 +12,7 @@ import openpyxl as xl
 from binance import Client
 from binance import exceptions as exc
 
-from check_for_volatile import main as check_for_volatile_main
+from app.find_volitile_symbol import main as check_for_volatile_main
 from config import Config
 from up_down_strategy import main as up_down_strategy_main
 
