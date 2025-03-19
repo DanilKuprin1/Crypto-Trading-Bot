@@ -22,25 +22,4 @@ This software is an automated trading bot designed to interact with the Binance 
 5. **Live Monitoring**: The bot continuously updates its position and reacts to market movements.
 6. **Trade Closure**: When profit/loss targets are hit, the bot closes the trade and records the results.
 
-## Requirements
-- Python 3.8+
-- Binance API Key & Secret
-- Binance Python SDK (`python-binance`)
-
-## Usage
-1. **Install Dependencies:**
-   ```sh
-   pip install python-binance
-   ```
-2. **Set API Credentials**: Modify `Config.py` with your Binance API Key and Secret.
-3. **Run the Bot:**
-   ```sh
-   python main.py
-   ```
-
-## Configuration
-The bot settings, including symbol selection, strategy parameters, and risk management configurations, are defined in `Config.py`.
-
-## Disclaimer
-Use this bot at your own risk. Trading cryptocurrencies involves significant risk, and past performance does not guarantee future results.
 
